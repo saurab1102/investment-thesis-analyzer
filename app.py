@@ -5,6 +5,20 @@ def count_slides(file):
     prs = Presentation(file)
     return len(prs.slides)
 
+def extract_slide_text(file):
+    prs = Presentation(file)
+    slide_texts = []
+    for i, slide in enumerate(prs.slides):
+        content = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                text = shape.text.strip()
+                if text:
+                    content.append(text)
+        slide_texts.append({"slide_num": i + 1, "text": " ".join(content)})
+    return slide_texts
+
+
 st.set_page_config(page_title="Investment Thesis Generator", layout="centered")
 
 st.title("Automated Investment Thesis Generator (POC)")
@@ -34,7 +48,15 @@ if uploaded_file:
         else:
             st.success(f"Valid file with {slide_count} slides.")
             if st.button("Proceed to Analysis"):
-                st.session_state["pptx_file"] = uploaded_file
-                st.session_state["slide_count"] = slide_count
-                st.success("Ready to extract text.")
+                with st.spinner("Extracting text from slides..."):
+                     slide_data = extract_slide_text(uploaded_file)
+                     st.session_state["slide_data"] = slide_data
+                     st.success("Text extraction complete.")
+                     #st.subheader("Extracted Slide Text")
+                     #for slide in slide_data:
+                     #    st.markdown(f"**Slide {slide['slide_num']}**")
+                     #    st.write(slide['text'])
+                     total_text = sum(len(s["text"]) for s in slide_data)
+                     if total_text == 0:
+                         st.error("No readable text found in the deck.")
 
