@@ -18,7 +18,7 @@ def query_together(prompt, model="mistralai/Mixtral-8x7B-Instruct-v0.1", max_tok
         "temperature": 0.3,
         "top_p": 0.9
     }
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    response = requests.post(url, headers=headers, json=payload)
     if response.status_code != 200:
         raise RuntimeError(f"LLM API error: {response.status_code} - {response.text}")
     return response.json()["choices"][0]["text"].strip()
