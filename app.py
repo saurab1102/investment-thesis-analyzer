@@ -1,18 +1,15 @@
 import streamlit as st
 from pptx import Presentation
 from llm_client import query_together
+from report_generator import generate_pdf_report
 import json
 import re
-from report_generator import generate_pdf_report
+from datetime import datetime
 
 REQUIRED_TYPES = [
     "Problem", "Solution", "Market", "Business Model",
     "Competition", "Team", "Financials", "Traction", "Funding Ask"
 ]
-
-def count_slides(file):
-    prs = Presentation(file)
-    return len(prs.slides)
 
 def extract_slide_text(file):
     prs = Presentation(file)
@@ -27,31 +24,6 @@ def extract_slide_text(file):
         slide_texts.append({"slide_num": i + 1, "text": " ".join(content)})
     return slide_texts
 
-def build_classification_prompt(slides):
-    intro = (
-        "You are an AI assistant that classifies slides from a startup pitch deck. "
-        "Each slide must be assigned one of the following categories:\n"
-        "Problem, Solution, Market, Business Model, Competition, Team, Financials, Traction, Funding Ask, Unclassified.\n"
-        "For each slide, respond in this JSON format:\n"
-        "{\"slide_num\": 1, \"category\": \"Team\"}\n"
-        "Here are the slides:\n"
-    )
-    body = ""
-    for slide in slides:
-        body += f"\nSlide {slide['slide_num']}:\n{slide['text']}\n"
-    return intro + body
-
-def classify_slides_with_llm(slides):
-    prompt = build_classification_prompt(slides)
-    raw_output = query_together(prompt)
-    return raw_output
-
-def parse_classification_output(output_text):
-    try:
-        return json.loads(output_text)
-    except json.JSONDecodeError as e:
-        raise ValueError("LLM returned invalid JSON") from e
-
 def classify_single_slide(text):
     prompt = (
         "Classify the following slide into one of the categories:\n"
@@ -62,20 +34,16 @@ def classify_single_slide(text):
     return query_together(prompt)
 
 def classify_all_slides(slides):
-    results = []
     for slide in slides:
         try:
             label = classify_single_slide(slide["text"])
             slide["category"] = label.strip()
         except Exception:
             slide["category"] = "Unclassified"
-        results.append(slide)
-    return results
-    
-    
+    return slides
+
 def build_analysis_prompt(slides):
     classified = [s for s in slides if s.get("category") != "Unclassified"]
-
     header = (
         "You are an AI investment analyst. Based on the following pitch deck content, produce an investment thesis. "
         "Return your response as a JSON object with the following fields:\n\n"
@@ -95,52 +63,46 @@ def build_analysis_prompt(slides):
         "Traction 10, Financials 10, Clarity 5\n\n"
         "Classified Slides:\n"
     )
-
     grouped = {}
     for slide in classified:
         cat = slide["category"]
         grouped.setdefault(cat, []).append(slide["text"])
-
     body = ""
     for cat in grouped:
         content = "\n".join(grouped[cat])
         body += f"\n---\nCategory: {cat}\n{content}\n"
-
     return header + body
 
 def analyze_pitch(slides):
     prompt = build_analysis_prompt(slides)
-    raw_output = query_together(prompt, max_tokens=3000)
-    return raw_output
+    return query_together(prompt, max_tokens=3000)
 
 def parse_analysis_output(raw_text):
     cleaned = raw_text.strip()
     cleaned = re.sub(r"^```json\s*|```$", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^```\s*|```$", "", cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r"^---\s*", "", cleaned)
-    print(cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("Could not find valid JSON object boundaries in LLM output.")
+    json_text = cleaned[start:end + 1]
+    print(json_text)
     try:
-        return json.loads(cleaned)
+        data = json.loads(json_text)
     except json.JSONDecodeError as e:
-        raise ValueError("Invalid JSON in LLM analysis output.") from e
+        raise ValueError("LLM returned malformed JSON.") from e
 
+    data["processing_date"] = datetime.utcnow().strftime("%d-%m-%Y %H:%M:%S UTC")
+    return data
 
 
 st.set_page_config(page_title="Investment Thesis Generator", layout="centered")
 
-st.title("Automated Investment Thesis Generator (POC)")
+st.title("Automated Investment Thesis Generator")
 
 st.markdown("""
-Upload a startup pitch deck in .pptx format. The deck should have 5–20 slides and include at least 3 of the following:  
-- Problem  
-- Solution/Product  
-- Market  
-- Business Model  
-- Competition  
-- Team  
-- Financials  
-- Traction  
-- Funding Ask
+Upload a startup pitch deck in .pptx format. The deck must have 5–20 slides and include at least 3 of the following types:  
+Problem, Solution/Product, Market, Business Model, Competition, Team, Financials, Traction, Funding Ask.
 """)
 
 uploaded_file = st.file_uploader("Upload your PowerPoint (.pptx only)", type=["pptx"])
@@ -149,56 +111,50 @@ if uploaded_file:
     if uploaded_file.size > 50 * 1024 * 1024:
         st.error("File size exceeds 50MB.")
     else:
-        slide_count = count_slides(uploaded_file)
+        prs = Presentation(uploaded_file)
+        slide_count = len(prs.slides)
         if not (5 <= slide_count <= 20):
-            st.error(f"Invalid slide count: {slide_count}. Must be between 5 and 20.")
+            st.error(f"Slide count {slide_count} is out of bounds (5–20).")
         else:
-            st.success(f"Valid file with {slide_count} slides.")
-
-            if "slide_data" not in st.session_state:
-                if st.button("Proceed to Analysis"):
+            if st.button("Generate Investment Report"):
+                try:
                     with st.spinner("Extracting text from slides..."):
                         slide_data = extract_slide_text(uploaded_file)
-                        st.session_state["slide_data"] = slide_data
-                        st.success("Text extraction complete.")
+                    st.success("Slide text extracted.")
 
-if "slide_data" in st.session_state:
-    slide_data = st.session_state["slide_data"]
+                    with st.spinner("Classifying slides..."):
+                        classified = classify_all_slides(slide_data)
+                    st.success("Slides classified.")
 
-    if st.button("Classify Slides with AI"):
-        with st.spinner("Classifying each slide..."):
-            classified_slides = classify_all_slides(slide_data)
-            print([s["category"] for s in classified_slides])
-            st.session_state["classified_slides"] = classified_slides
+                    found = {s["category"] for s in classified if s["category"] in REQUIRED_TYPES}
+                    if len(found) < 3:
+                        st.error(f"Only {len(found)} required slide types found: {', '.join(found)}")
+                        st.stop()
 
-            found_types = {s["category"] for s in classified_slides if s["category"] in REQUIRED_TYPES}
-            if len(found_types) < 3:
-                st.error(f"Only {len(found_types)} valid categories found: {', '.join(found_types)}")
-            else:
-                st.success(f"Classification complete. Categories found: {', '.join(found_types)}")
+                    with st.spinner("Analyzing pitch deck..."):
+                        raw = analyze_pitch(classified)
+                        parsed = parse_analysis_output(raw)
+                    st.success("Analysis complete.")
 
-if "classified_slides" in st.session_state:
-    if st.button("Run Investment Analysis"):
-        with st.spinner("Analyzing pitch deck..."):
-            try:
-                raw_analysis = analyze_pitch(st.session_state["classified_slides"])
-                parsed = parse_analysis_output(raw_analysis)
-                st.session_state["analysis_result"] = parsed
-                st.success("Analysis complete.")
-            except Exception as e:
-                st.error(str(e))
-                st.stop()
+                    with st.spinner("Generating PDF report..."):
+                        pdf_bytes, pdf_name = generate_pdf_report(parsed)
+                    st.success("Report ready.")
 
-        # Optional debug: display result
-        st.subheader("Investment Recommendation")
-        st.write(parsed["recommendation"])
-        st.write(f"Overall Score: {parsed['overall_score']}")
-        st.write(f"Confidence Score: {parsed['confidence_score']}")
-        
-if "analysis_result" in st.session_state:
-    if st.button("Generate PDF Report"):
-        pdf_bytes, pdf_name = generate_pdf_report(st.session_state["analysis_result"], startup_name="DemoStartup")
-        st.download_button(label="Download Report", data=pdf_bytes, file_name=pdf_name, mime="application/pdf")
+                    st.subheader("Recommendation Summary")
+                    st.write(f"**{parsed['recommendation']}**")
+                    st.write(f"Overall Score: {parsed['overall_score']}")
+                    st.write(f"Confidence Score: {parsed['confidence_score']}")
+                    st.session_state["pdf_bytes"] = pdf_bytes
+                    st.session_state["pdf_name"] = pdf_name
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+if "pdf_bytes" in st.session_state and "pdf_name" in st.session_state:
+    st.download_button("Download PDF Report",
+                       data=st.session_state["pdf_bytes"],
+                       file_name=st.session_state["pdf_name"],
+                       mime="application/pdf")
 
 
 
